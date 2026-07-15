@@ -1,3 +1,20 @@
+export interface ProductionBrief {
+  contentTitle: string;
+  objective: string;
+  keyMessage: string;
+  briefs: {
+    role: "Video Talent" | "Graphic Designer" | "Video Editor";
+    sections: { 
+      heading: string; 
+      items?: string[];
+      table?: {
+        columns: string[];
+        rows: string[][];
+      };
+    }[];
+  }[];
+}
+
 export interface Post {
   id: string;
   platforms: string[]; // ['instagram', 'x', 'linkedin', 'facebook', 'tiktok', 'threads']
@@ -11,6 +28,7 @@ export interface Post {
   repeat?: "none" | "7" | "14" | "30";
   skippedOccurrences?: string[]; // array of 'YYYY-MM-DD' dates that were skipped
   approvalComment?: string; // stored comment from requested changes
+  productionBrief?: ProductionBrief;
 }
 
 export interface Channel {

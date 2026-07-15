@@ -40,12 +40,19 @@ import {
   Check,
   Briefcase,
   Plus,
+  Clipboard,
+  Palette,
+  Scissors,
+  Copy,
+  ArrowRight,
+  Printer,
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import {
   Post,
   Channel,
   Workspace,
+  ProductionBrief,
   PLATFORMS_CONFIG,
   getStoredChannels,
   saveStoredChannels,
@@ -376,6 +383,15 @@ export default function PlanoApp() {
 
   // Deletion state
   const [deletingPostId, setDeletingPostId] = useState<string | null>(null);
+
+  // Production Brief State
+  const [isBriefModalOpen, setIsBriefModalOpen] = useState(false);
+  const [briefRoles, setBriefRoles] = useState<string[]>(["Video Talent"]);
+  const [briefLanguage, setBriefLanguage] = useState("English");
+  const [briefFormat, setBriefFormat] = useState("Reels/TikTok Video");
+  const [isGeneratingBrief, setIsGeneratingBrief] = useState(false);
+  const [generatedBrief, setGeneratedBrief] = useState<ProductionBrief | null>(null);
+  const [briefActiveTab, setBriefActiveTab] = useState<string>("");
 
   // AI use flag for onboarding checklist
   const [hasUsedAi, setHasUsedAi] = useState<boolean>(false);
@@ -739,6 +755,7 @@ export default function PlanoApp() {
             status: actualStatus,
             publishedAt: actualStatus === "published" ? currentTimestamp : null,
             repeat: repeat === "none" ? undefined : repeat,
+            productionBrief: generatedBrief || undefined,
             // Clear approval comment if submitting for review
             approvalComment: actualStatus === "pending_review" ? undefined : p.approvalComment,
           };
@@ -770,6 +787,7 @@ export default function PlanoApp() {
         status: actualStatus,
         publishedAt: actualStatus === "published" ? currentTimestamp : null,
         repeat: repeat === "none" ? undefined : repeat,
+        productionBrief: generatedBrief || undefined,
       };
       updatePostsInStorage([newPost, ...posts]);
       if (submittedForReview) {
@@ -792,6 +810,7 @@ export default function PlanoApp() {
     setCaptions({});
     setIsCustomized(false);
     setMedia(null);
+    setGeneratedBrief(null);
     // set to today's date placeholder
     setScheduledAt("2026-07-14T12:00");
     setComposerStatus("scheduled");
@@ -801,7 +820,7 @@ export default function PlanoApp() {
     if (connected.length > 0 && selectedPlatforms.length === 0) {
       setSelectedPlatforms([connected[0]]);
     }
-  }, [channels, selectedPlatforms]);
+  }, [channels, selectedPlatforms, setGeneratedBrief, setSelectedPlatforms, setEditingPostId, setCaption, setCaptions, setIsCustomized, setMedia, setScheduledAt, setComposerStatus, setRepeat]);
 
   // Global Keyboard Shortcut: "N" to open composer
   useEffect(() => {
@@ -839,6 +858,7 @@ export default function PlanoApp() {
     setScheduledAt(post.scheduledAt);
     setComposerStatus(post.status === "draft" ? "draft" : "scheduled");
     setRepeat(post.repeat || "none");
+    setGeneratedBrief(post.productionBrief || null);
     setActiveView("create");
     triggerNotification("Loaded post into composer.", "info");
   };
@@ -1149,6 +1169,222 @@ Return ONLY the JSON array. Do not include markdown formatting or code blocks.`;
     } finally {
       setIsGeneratingPlan(false);
     }
+  };
+
+  const handleGenerateBrief = async (retry = false) => {
+    const currentCaption = isCustomized && computedActiveCaptionTab ? captions[computedActiveCaptionTab] || "" : caption;
+    
+    if (!currentCaption.trim() || briefRoles.length === 0) {
+      triggerNotification("Please ensure you have a caption and selected at least one role.", "error");
+      return;
+    }
+
+    setIsGeneratingBrief(true);
+    markAiUsed();
+
+    const roleRequirements = {
+      "Video Talent": `hook line to say in the first 3 seconds, full talking points/script outline, tone & energy direction, wardrobe suggestion, do's & don'ts on camera.${briefFormat === "Reels/TikTok Video" ? " ALSO INCLUDE a 'Shot List' section with a numbered table of scenes." : ""}`,
+      "Graphic Designer": "visual concept, composition/layout direction, exact dimensions per selected platform (e.g. 1080x1350 feed, 1080x1920 story), color & typography direction, text elements to include (headline, subheadline, CTA), reference style keywords.",
+      "Video Editor": `recommended duration per platform, pacing & cut style, on-screen caption/subtitle direction, music/audio mood, b-roll suggestions, safe zones for platform UI, export specs (ratio, resolution, format).${briefFormat === "Reels/TikTok Video" ? " ALSO INCLUDE a 'Shot List' section with a numbered table of scenes." : ""}`
+    };
+
+    const rolesPrompt = briefRoles.map(role => `${role}: ${roleRequirements[role as keyof typeof roleRequirements]}`).join("\n");
+
+    const prompt = `You are a professional Creative Director. Generate a detailed production brief for a social media post based on the following context:
+Caption/Content: ${currentCaption}
+Platforms: ${selectedPlatforms.join(", ")}
+Format: ${briefFormat}
+Language: ${briefLanguage}
+
+The brief must be tailored for the following roles:
+${rolesPrompt}
+
+If a 'Shot List' is requested for a role, it MUST be a section with heading "Shot List" containing a table.
+The table must have these exact columns: "Scene", "Duration (s)", "Visual", "Dialogue/Action", "Text Overlay".
+The total duration of all scenes must match your recommended video length for the format.
+
+Return the response as a strict JSON object (no markdown fences, no extra text) in this exact shape:
+{
+  "contentTitle": "string",
+  "objective": "string",
+  "keyMessage": "string",
+  "briefs": [
+    {
+      "role": "Video Talent" | "Graphic Designer" | "Video Editor",
+      "sections": [ 
+        { 
+          "heading": "string", 
+          "items": ["string"],
+          "table": { "columns": ["string"], "rows": [["string"]] } 
+        } 
+      ]
+    }
+  ]
+}
+${retry ? "IMPORTANT: Return ONLY valid JSON. No markdown code blocks." : ""}`;
+
+    try {
+      const response = await fetch("/api/gemini", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          messages: [{ role: "user", content: prompt }]
+        }),
+      });
+
+      if (!response.ok) throw new Error("AI generation failed.");
+
+      const data = await response.json();
+      let text = data.response;
+
+      // Clean markdown fences if present
+      text = text.replace(/```json\n?|```/g, "").trim();
+
+      try {
+        const parsed: ProductionBrief = JSON.parse(text);
+        setGeneratedBrief(parsed);
+        if (parsed.briefs.length > 0) {
+          setBriefActiveTab(parsed.briefs[0].role);
+        }
+      } catch (parseErr) {
+        if (!retry) {
+          console.warn("JSON parse failed, retrying once...");
+          handleGenerateBrief(true);
+          return;
+        }
+        throw parseErr;
+      }
+    } catch (err) {
+      console.error(err);
+      triggerNotification("AI generation failed. Please try again.", "error");
+    } finally {
+      setIsGeneratingBrief(false);
+    }
+  };
+
+  const handleExportBrief = () => {
+    if (!generatedBrief) return;
+
+    const printWindow = window.open("", "_blank");
+    if (!printWindow) {
+      triggerNotification("Please allow popups to export the brief.", "error");
+      return;
+    }
+
+    const platformListHtml = selectedPlatforms.map(p => `
+      <span style="display: inline-flex; align-items: center; gap: 4px; border: 1px solid #ddd; padding: 4px 8px; border-radius: 4px; font-size: 11px; font-weight: bold; color: #555;">
+        ${PLATFORMS_CONFIG[p]?.name}
+      </span>
+    `).join(" ");
+
+    const briefsHtml = generatedBrief.briefs.map(b => `
+      <div style="margin-bottom: 40px; page-break-inside: avoid;">
+        <h2 style="border-bottom: 2px solid #000; padding-bottom: 8px; color: #000; text-transform: uppercase; font-size: 16px; margin-bottom: 20px;">Role: ${b.role}</h2>
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+          ${b.sections.map(s => `
+            <div style="${s.table ? "grid-column: span 2;" : ""}">
+              <h3 style="font-size: 12px; color: #888; text-transform: uppercase; margin-bottom: 10px; border-left: 3px solid #6366f1; padding-left: 8px;">${s.heading}</h3>
+              ${s.table ? `
+                <table style="width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 11px;">
+                  <thead>
+                    <tr style="background: #f8fafc;">
+                      ${s.table.columns.map(col => `<th style="border: 1px solid #e2e8f0; padding: 8px; text-align: left; color: #64748b;">${col}</th>`).join("")}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    ${s.table.rows.map(row => `
+                      <tr>
+                        ${row.map(cell => `<td style="border: 1px solid #e2e8f0; padding: 8px; color: #334155; vertical-align: top;">${cell}</td>`).join("")}
+                      </tr>
+                    `).join("")}
+                  </tbody>
+                </table>
+              ` : `
+                <ul style="padding-left: 18px; font-size: 12px; color: #334155; line-height: 1.6; margin: 0;">
+                  ${s.items?.map(item => `<li style="margin-bottom: 4px;">${item}</li>`).join("")}
+                </ul>
+              `}
+            </div>
+          `).join("")}
+        </div>
+      </div>
+    `).join("");
+
+    const html = `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>Production Brief - ${generatedBrief.contentTitle}</title>
+        <style>
+          @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+          body { font-family: 'Inter', sans-serif; padding: 50px; max-width: 900px; margin: 0 auto; color: #1e293b; background: white; -webkit-print-color-adjust: exact; }
+          .header { border-bottom: 3px solid #0f172a; padding-bottom: 25px; margin-bottom: 35px; display: flex; justify-content: space-between; align-items: flex-end; }
+          .header-left h1 { margin: 0; font-size: 32px; font-weight: 700; letter-spacing: -1px; color: #0f172a; }
+          .header-left .meta { margin-top: 10px; font-size: 12px; color: #64748b; display: flex; gap: 20px; font-weight: 500; }
+          .confidential { font-size: 10px; font-weight: 700; color: #cbd5e1; letter-spacing: 2px; }
+          .platforms { margin-bottom: 30px; }
+          .platform-label { font-size: 10px; font-weight: 700; color: #94a3b8; text-transform: uppercase; margin-bottom: 8px; display: block; }
+          .objective-section { background: #f1f5f9; padding: 25px; border-radius: 12px; margin-bottom: 40px; border: 1px solid #e2e8f0; display: grid; grid-template-columns: 1fr 1fr; gap: 30px; }
+          .objective-section h4 { margin: 0 0 8px 0; font-size: 11px; color: #64748b; text-transform: uppercase; letter-spacing: 0.5px; }
+          .objective-section p { margin: 0; font-size: 13px; font-weight: 500; color: #1e293b; line-height: 1.5; }
+          @media print {
+            body { padding: 30px; }
+            .no-print { display: none; }
+          }
+        </style>
+      </head>
+      <body>
+        <div class="header">
+          <div class="header-left">
+            <h1>PRODUCTION BRIEF</h1>
+            <div class="meta">
+              <span><strong>DATE:</strong> ${new Date().toLocaleDateString()}</span>
+              <span><strong>ID:</strong> ${Math.random().toString(36).substring(7).toUpperCase()}</span>
+            </div>
+          </div>
+          <div class="confidential">CONFIDENTIAL DOCUMENT</div>
+        </div>
+
+        <div style="margin-bottom: 30px;">
+           <h2 style="font-size: 20px; margin: 0 0 15px 0; color: #0f172a;">${generatedBrief.contentTitle}</h2>
+           <div class="platforms">
+             <span class="platform-label">Target Distribution</span>
+             ${platformListHtml}
+           </div>
+        </div>
+
+        <div class="objective-section">
+          <div>
+            <h4>Project Objective</h4>
+            <p>${generatedBrief.objective}</p>
+          </div>
+          <div>
+            <h4>Primary Message</h4>
+            <p>${generatedBrief.keyMessage}</p>
+          </div>
+        </div>
+
+        ${briefsHtml}
+
+        <footer style="margin-top: 60px; border-top: 1px solid #e2e8f0; padding-top: 20px; font-size: 10px; color: #94a3b8; display: flex; justify-content: space-between;">
+          <span>Generated by Antigravity Media Planner</span>
+          <span>&copy; ${new Date().getFullYear()} All Rights Reserved</span>
+        </footer>
+
+        <script>
+          window.onload = () => {
+            setTimeout(() => {
+              window.print();
+              window.onafterprint = () => window.close();
+            }, 500);
+          };
+        </script>
+      </body>
+      </html>
+    `;
+
+    printWindow.document.write(html);
+    printWindow.document.close();
   };
 
   const fetchAIInsights = async () => {
@@ -2754,6 +2990,14 @@ Return ONLY the JSON array. Do not include markdown formatting or code blocks.`;
                               <Sparkles className="w-3.5 h-3.5" /> Improve Hook
                             </button>
 
+                            {/* Production Brief Button */}
+                            <button
+                              onClick={() => setIsBriefModalOpen(true)}
+                              className="flex items-center gap-1 text-[11px] font-semibold text-slate-300 hover:text-white transition"
+                            >
+                              <Clipboard className="w-3.5 h-3.5" /> Production Brief
+                            </button>
+
                             {/* AI Write Popover */}
                             <AnimatePresence>
                               {isAiPopoverOpen && (
@@ -3374,6 +3618,13 @@ Return ONLY the JSON array. Do not include markdown formatting or code blocks.`;
                                               timeStyle: "short",
                                             })}
                                           </span>
+
+                                          {post.productionBrief && (
+                                            <span className="text-[10px] font-bold text-indigo-400 bg-indigo-500/10 px-2 py-0.5 rounded border border-indigo-500/20 flex items-center gap-1" title="Production Brief Attached">
+                                              <Clipboard className="w-3 h-3" />
+                                              Brief
+                                            </span>
+                                          )}
                                           
                                           {/* Repeat Badge */}
                                           {post.repeat && post.repeat !== "none" && (
@@ -4390,6 +4641,301 @@ Return ONLY the JSON array. Do not include markdown formatting or code blocks.`;
                 </div>
               )}
             </motion.div>
+          </AnimatePresence>
+
+          {/* Production Brief Modal */}
+          <AnimatePresence>
+            {isBriefModalOpen && (
+              <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+                <motion.div
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  onClick={() => setIsBriefModalOpen(false)}
+                  className="absolute inset-0 bg-slate-950/80 backdrop-blur-sm"
+                />
+                <motion.div
+                  initial={{ opacity: 0, scale: 0.95, y: 20 }}
+                  animate={{ opacity: 1, scale: 1, y: 0 }}
+                  exit={{ opacity: 0, scale: 0.95, y: 20 }}
+                  className="relative w-full max-w-4xl bg-slate-900 border border-slate-800 rounded-3xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]"
+                >
+                  {/* Header */}
+                  <div className="p-6 border-b border-slate-800 flex items-center justify-between bg-slate-900/50">
+                    <div className="flex items-center gap-3">
+                      <div className="w-10 h-10 rounded-xl bg-indigo-500/10 flex items-center justify-center text-indigo-400">
+                        <Clipboard className="w-5 h-5" />
+                      </div>
+                      <div>
+                        <h2 className="text-xl font-bold text-white">Production Brief Generator</h2>
+                        <p className="text-xs text-slate-400">Transform your caption into actionable production specs for your team.</p>
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => setIsBriefModalOpen(false)}
+                      className="p-2 hover:bg-slate-800 rounded-lg text-slate-400 hover:text-white transition"
+                    >
+                      <X className="w-5 h-5" />
+                    </button>
+                  </div>
+
+                  <div className="flex-1 overflow-y-auto p-6 space-y-8">
+                    {!generatedBrief ? (
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                        {/* Configuration Panel */}
+                        <div className="space-y-6">
+                          <div className="space-y-3">
+                            <label className="text-sm font-bold text-slate-200">Production Roles</label>
+                            <div className="grid grid-cols-1 gap-2">
+                              {["Video Talent", "Graphic Designer", "Video Editor"].map(role => (
+                                <button
+                                  key={role}
+                                  onClick={() => {
+                                    if (briefRoles.includes(role)) {
+                                      setBriefRoles(prev => prev.filter(r => r !== role));
+                                    } else {
+                                      setBriefRoles(prev => [...prev, role]);
+                                    }
+                                  }}
+                                  className={`flex items-center justify-between p-3 rounded-xl border transition-all ${
+                                    briefRoles.includes(role)
+                                      ? "bg-indigo-500/10 border-indigo-500/50 text-indigo-300"
+                                      : "bg-slate-950/50 border-slate-800 text-slate-400 hover:border-slate-700"
+                                  }`}
+                                >
+                                  <div className="flex items-center gap-3">
+                                    {role === "Video Talent" && <Video className="w-4 h-4" />}
+                                    {role === "Graphic Designer" && <Palette className="w-4 h-4" />}
+                                    {role === "Video Editor" && <Scissors className="w-4 h-4" />}
+                                    <span className="text-sm font-medium">{role}</span>
+                                  </div>
+                                  {briefRoles.includes(role) && <Check className="w-4 h-4" />}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+
+                          <div className="grid grid-cols-2 gap-4">
+                            <div className="space-y-3">
+                              <label className="text-sm font-bold text-slate-200">Language</label>
+                              <select
+                                value={briefLanguage}
+                                onChange={(e) => setBriefLanguage(e.target.value)}
+                                className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-sm text-white focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
+                              >
+                                <option>English</option>
+                                <option>Bahasa Indonesia</option>
+                              </select>
+                            </div>
+                            <div className="space-y-3">
+                              <label className="text-sm font-bold text-slate-200">Format</label>
+                              <select
+                                value={briefFormat}
+                                onChange={(e) => setBriefFormat(e.target.value)}
+                                className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-sm text-white focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
+                              >
+                                <option>Reels/TikTok Video</option>
+                                <option>Static Post</option>
+                                <option>Carousel</option>
+                                <option>Story</option>
+                              </select>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Context Preview */}
+                        <div className="bg-slate-950/50 border border-slate-800 rounded-2xl p-5 space-y-4">
+                          <div className="flex items-center gap-2 mb-2">
+                            <div className="w-2 h-2 rounded-full bg-indigo-500" />
+                            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Context Context</span>
+                          </div>
+                          
+                          <div className="space-y-4">
+                            <div>
+                              <span className="text-[10px] font-bold text-slate-500 uppercase">Target Platforms</span>
+                              <div className="flex flex-wrap gap-2 mt-1.5">
+                                {selectedPlatforms.map(p => (
+                                  <span key={p} className="px-2 py-1 bg-slate-900 border border-slate-800 rounded-md text-[10px] text-slate-300 flex items-center gap-1.5">
+                                    {getPlatformIcon(p)} {PLATFORMS_CONFIG[p]?.name}
+                                  </span>
+                                ))}
+                              </div>
+                            </div>
+                            <div>
+                              <span className="text-[10px] font-bold text-slate-500 uppercase">Base Caption</span>
+                              <div className="mt-1.5 p-3 bg-slate-900/80 rounded-xl border border-slate-800 text-[11px] text-slate-400 line-clamp-6 leading-relaxed italic">
+                                &quot;{isCustomized && computedActiveCaptionTab ? captions[computedActiveCaptionTab] : caption}&quot;
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="space-y-6">
+                        {/* Results Header */}
+                        <div className="bg-indigo-500/5 border border-indigo-500/10 rounded-2xl p-5">
+                          <h3 className="text-lg font-bold text-white mb-1">{generatedBrief.contentTitle}</h3>
+                          <div className="grid grid-cols-2 gap-6 mt-4">
+                            <div>
+                              <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Objective</span>
+                              <p className="text-xs text-slate-300 mt-1">{generatedBrief.objective}</p>
+                            </div>
+                            <div>
+                              <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Key Message</span>
+                              <p className="text-xs text-slate-300 mt-1">{generatedBrief.keyMessage}</p>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Role Tabs */}
+                        <div className="flex flex-col gap-4">
+                          <div className="flex items-center gap-2 p-1 bg-slate-950 rounded-xl w-fit">
+                            {generatedBrief.briefs.map(b => (
+                              <button
+                                key={b.role}
+                                onClick={() => setBriefActiveTab(b.role)}
+                                className={`px-4 py-2 rounded-lg text-xs font-bold transition-all ${
+                                  briefActiveTab === b.role
+                                    ? "bg-slate-800 text-white shadow-lg"
+                                    : "text-slate-500 hover:text-slate-300"
+                                }`}
+                              >
+                                {b.role}
+                              </button>
+                            ))}
+                          </div>
+
+                          {generatedBrief.briefs.map(b => (
+                            <div
+                              key={b.role}
+                              className={briefActiveTab === b.role ? "block" : "hidden"}
+                            >
+                              <div className="grid grid-cols-1 gap-6">
+                                {b.sections.map((section, sIdx) => (
+                                  <div 
+                                    key={sIdx} 
+                                    className={`bg-slate-950/40 border border-slate-800 p-5 rounded-2xl ${section.table ? "col-span-full" : "md:col-span-1"}`}
+                                  >
+                                    <h4 className="text-[11px] font-bold text-indigo-400 uppercase tracking-widest mb-3 flex items-center gap-2">
+                                      <span className="w-1.5 h-1.5 rounded-full bg-indigo-500" />
+                                      {section.heading}
+                                    </h4>
+                                    
+                                    {section.table ? (
+                                      <div className="overflow-x-auto rounded-xl border border-slate-800/50">
+                                        <table className="w-full text-left border-collapse min-w-[600px]">
+                                          <thead>
+                                            <tr className="bg-slate-900/50">
+                                              {section.table.columns.map((col, cIdx) => (
+                                                <th key={cIdx} className="p-3 text-[10px] font-bold text-slate-500 uppercase border-b border-slate-800 whitespace-nowrap">
+                                                  {col}
+                                                </th>
+                                              ))}
+                                            </tr>
+                                          </thead>
+                                          <tbody>
+                                            {section.table.rows.map((row, rIdx) => (
+                                              <tr key={rIdx} className="hover:bg-slate-800/20 transition">
+                                                {row.map((cell, cIdx) => (
+                                                  <td key={cIdx} className="p-3 text-[11px] text-slate-300 border-b border-slate-800/50 align-top">
+                                                    {cell}
+                                                  </td>
+                                                ))}
+                                              </tr>
+                                            ))}
+                                          </tbody>
+                                        </table>
+                                      </div>
+                                    ) : (
+                                      <ul className="space-y-2">
+                                        {section.items?.map((item, iIdx) => (
+                                          <li key={iIdx} className="text-xs text-slate-300 flex items-start gap-2 leading-relaxed">
+                                            <ArrowRight className="w-3 h-3 text-slate-600 mt-0.5 shrink-0" />
+                                            <span>{item}</span>
+                                          </li>
+                                        ))}
+                                      </ul>
+                                    )}
+                                  </div>
+                                ))}
+                              </div>
+                              
+                              <div className="mt-6 flex items-center gap-3">
+                                <button
+                                  onClick={() => {
+                                    const textBrief = [
+                                      `BRIEF: ${b.role}`,
+                                      `Title: ${generatedBrief.contentTitle}`,
+                                      `Objective: ${generatedBrief.objective}`,
+                                      "",
+                                      ...b.sections.map(s => {
+                                        if (s.table) {
+                                          const tableHeader = s.table.columns.join(" | ");
+                                          const tableRows = s.table.rows.map(r => r.join(" | ")).join("\n");
+                                          return `${s.heading}:\n${tableHeader}\n${"-".repeat(tableHeader.length)}\n${tableRows}`;
+                                        }
+                                        return `${s.heading}:\n${s.items?.map(i => `- ${i}`).join("\n")}`;
+                                      })
+                                    ].join("\n\n");
+                                    navigator.clipboard.writeText(textBrief);
+                                    triggerNotification(`${b.role} brief copied to clipboard.`, "success");
+                                  }}
+                                  className="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-white rounded-xl text-xs font-bold flex items-center gap-2 transition"
+                                >
+                                  <Copy className="w-4 h-4" /> Copy {b.role} Brief
+                                </button>
+                                <button
+                                  onClick={() => handleExportBrief()}
+                                  className="px-4 py-2.5 bg-white text-slate-900 hover:bg-slate-100 rounded-xl text-xs font-bold flex items-center gap-2 transition"
+                                >
+                                  <Printer className="w-4 h-4" /> Export PDF
+                                </button>
+                                <button
+                                  onClick={() => handleGenerateBrief()}
+                                  className="px-4 py-2.5 bg-indigo-500/10 border border-indigo-500/20 text-indigo-400 hover:bg-indigo-500/20 rounded-xl text-xs font-bold flex items-center gap-2 transition"
+                                >
+                                  <RefreshCw className="w-4 h-4" /> Regenerate
+                                </button>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Footer */}
+                  {!generatedBrief && (
+                    <div className="p-6 border-t border-slate-800 bg-slate-900/50 flex justify-end">
+                      <button
+                        disabled={isGeneratingBrief || briefRoles.length === 0}
+                        onClick={() => handleGenerateBrief()}
+                        className="px-8 py-3 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white rounded-xl text-sm font-bold shadow-xl shadow-indigo-600/20 transition flex items-center gap-2"
+                      >
+                        {isGeneratingBrief ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Clipboard className="w-4 h-4" />}
+                        {isGeneratingBrief ? "Synthesizing Brief..." : "Generate Production Brief"}
+                      </button>
+                    </div>
+                  )}
+                  {generatedBrief && (
+                    <div className="p-6 border-t border-slate-800 bg-slate-900/50 flex justify-between items-center">
+                      <button
+                        onClick={() => setGeneratedBrief(null)}
+                        className="text-xs font-bold text-slate-400 hover:text-slate-200 flex items-center gap-2 transition"
+                      >
+                        <ChevronLeft className="w-4 h-4" /> Change Configuration
+                      </button>
+                      <button
+                        onClick={() => setIsBriefModalOpen(false)}
+                        className="px-8 py-3 bg-slate-800 hover:bg-slate-700 text-white rounded-xl text-sm font-bold transition"
+                      >
+                        Done
+                      </button>
+                    </div>
+                  )}
+                </motion.div>
+              </div>
+            )}
           </AnimatePresence>
         </div>
       </main>
