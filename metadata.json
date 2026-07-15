@@ -1,0 +1,6 @@
+{
+  "name": "Plano",
+  "description": "A modern social media scheduling tool with a monthly calendar, multi-platform composer, content queue, AI assistant, and analytics.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
