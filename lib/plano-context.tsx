@@ -12,8 +12,6 @@ import {
   saveStoredPosts,
   getStoredWorkspaces,
   saveStoredWorkspaces,
-  getCurrentWorkspaceId,
-  saveCurrentWorkspaceId,
   getApprovalFlowEnabled,
   setApprovalFlowEnabled as persistApprovalFlowEnabled,
   getHasUsedAi,
@@ -41,8 +39,19 @@ interface PlanoContextValue {
   handleToggleChannel: (id: string) => void;
 
   workspaces: Workspace[];
-  currentWorkspaceId: string;
-  handleSwitchWorkspace: (workspaceId: string) => void;
+  // Real workspace UUID selected in components/workspace-switcher.tsx — null
+  // until that component's Supabase fetch resolves and seeds a default.
+  // This is the single source of truth for which workspace's posts/channels
+  // are loaded; the mock `workspaces` list above is unrelated legacy state
+  // still used by the (currently unreachable) NewWorkspaceModal.
+  currentWorkspaceId: string | null;
+  // Quiet switch: updates currentWorkspaceId and reloads posts/channels/
+  // approval-flow for it, no toast. Used by WorkspaceSwitcher to seed the
+  // initial default workspace once its fetch resolves.
+  setCurrentWorkspaceId: (workspaceId: string) => void;
+  // Same as setCurrentWorkspaceId, plus a "Switched to workspace" toast.
+  // Used by WorkspaceSwitcher when the user explicitly picks a workspace.
+  handleSwitchWorkspace: (workspaceId: string, workspaceName?: string) => void;
   handleCreateWorkspace: (name: string, color: string) => void;
   isWorkspaceDropdownOpen: boolean;
   setIsWorkspaceDropdownOpen: (open: boolean) => void;
@@ -70,7 +79,7 @@ export function PlanoProvider({ children }: { children: React.ReactNode }) {
   const [channels, setChannels] = useState<Channel[]>([]);
 
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
-  const [currentWorkspaceId, setCurrentWorkspaceId] = useState<string>("elabram");
+  const [currentWorkspaceId, setCurrentWorkspaceIdState] = useState<string | null>(null);
   const [isWorkspaceDropdownOpen, setIsWorkspaceDropdownOpen] = useState(false);
   const [isNewWorkspaceModalOpen, setIsNewWorkspaceModalOpen] = useState(false);
 
@@ -93,18 +102,15 @@ export function PlanoProvider({ children }: { children: React.ReactNode }) {
 
   // Initialize and load data from LocalStorage (deferred one tick, same as
   // the original, to avoid a hydration mismatch on the first paint).
+  // Posts/channels/approval-flow are NOT seeded here anymore — there's no
+  // valid workspace id until WorkspaceSwitcher's Supabase fetch resolves and
+  // calls setCurrentWorkspaceId below.
   useEffect(() => {
     const timer = setTimeout(() => {
       setMounted(true);
 
       const storedWorkspaces = getStoredWorkspaces();
       setWorkspaces(storedWorkspaces);
-      const activeWorkspaceId = getCurrentWorkspaceId();
-      setCurrentWorkspaceId(activeWorkspaceId);
-
-      setApprovalFlowEnabledState(getApprovalFlowEnabled(activeWorkspaceId));
-      setPosts(getStoredPosts(activeWorkspaceId));
-      setChannels(getStoredChannels(activeWorkspaceId));
       setHasUsedAiState(getHasUsedAi());
     }, 0);
 
@@ -145,7 +151,10 @@ export function PlanoProvider({ children }: { children: React.ReactNode }) {
   const updatePostsInStorage = useCallback(
     (updated: Post[]) => {
       setPosts(updated);
-      saveStoredPosts(updated, currentWorkspaceId);
+      // Falls back to whichever workspace lib/store.ts's internal fallback
+      // resolves if called with no workspace selected yet — shouldn't happen
+      // in practice since post-editing UI implies a workspace is active.
+      saveStoredPosts(updated, currentWorkspaceId ?? undefined);
     },
     [currentWorkspaceId]
   );
@@ -153,9 +162,16 @@ export function PlanoProvider({ children }: { children: React.ReactNode }) {
   const updateChannelsInStorage = useCallback(
     (updated: Channel[]) => {
       setChannels(updated);
-      saveStoredChannels(updated, currentWorkspaceId);
+      // Optimistic: local state updates immediately, the real
+      // connect/disconnect write to social_accounts happens in the
+      // background. Nothing to persist to if no workspace is selected yet.
+      if (!currentWorkspaceId) return;
+      saveStoredChannels(updated, currentWorkspaceId).catch((err) => {
+        console.error("Failed to save channel changes:", err);
+        triggerNotification("Failed to save channel changes.", "error");
+      });
     },
-    [currentWorkspaceId]
+    [currentWorkspaceId, triggerNotification]
   );
 
   const handleToggleChannel = useCallback(
@@ -233,22 +249,22 @@ export function PlanoProvider({ children }: { children: React.ReactNode }) {
     [router, triggerNotification]
   );
 
+  const setCurrentWorkspaceId = useCallback((workspaceId: string) => {
+    setCurrentWorkspaceIdState(workspaceId);
+    setApprovalFlowEnabledState(getApprovalFlowEnabled(workspaceId));
+    setPosts(getStoredPosts(workspaceId));
+    getStoredChannels(workspaceId)
+      .then(setChannels)
+      .catch((err) => console.error("Failed to load channels:", err));
+  }, []);
+
   const handleSwitchWorkspace = useCallback(
-    (workspaceId: string) => {
+    (workspaceId: string, workspaceName?: string) => {
       setCurrentWorkspaceId(workspaceId);
-      saveCurrentWorkspaceId(workspaceId);
-
-      setApprovalFlowEnabledState(getApprovalFlowEnabled(workspaceId));
-
-      const loadedPosts = getStoredPosts(workspaceId);
-      const loadedChannels = getStoredChannels(workspaceId);
-      setPosts(loadedPosts);
-      setChannels(loadedChannels);
-
-      const wsName = workspaces.find((w) => w.id === workspaceId)?.name || workspaceId;
+      const wsName = workspaceName || workspaces.find((w) => w.id === workspaceId)?.name || workspaceId;
       triggerNotification(`Switched to workspace: ${wsName}`, "success");
     },
-    [workspaces, triggerNotification]
+    [workspaces, setCurrentWorkspaceId, triggerNotification]
   );
 
   const handleCreateWorkspace = useCallback(
@@ -263,23 +279,20 @@ export function PlanoProvider({ children }: { children: React.ReactNode }) {
       saveStoredWorkspaces(updatedWorkspaces);
 
       setCurrentWorkspaceId(id);
-      saveCurrentWorkspaceId(id);
       setApprovalFlowEnabledState(false);
       persistApprovalFlowEnabled(id, false);
 
-      const loadedPosts = getStoredPosts(id);
-      const loadedChannels = getStoredChannels(id);
-      setPosts(loadedPosts);
-      setChannels(loadedChannels);
+      // setCurrentWorkspaceId above already loads posts/channels for `id`.
 
       setIsNewWorkspaceModalOpen(false);
 
       triggerNotification(`Workspace "${newWorkspace.name}" created successfully!`, "success");
     },
-    [workspaces, triggerNotification]
+    [workspaces, setCurrentWorkspaceId, triggerNotification]
   );
 
   const toggleApprovalFlow = useCallback(() => {
+    if (!currentWorkspaceId) return;
     const newVal = !approvalFlowEnabled;
     setApprovalFlowEnabledState(newVal);
     persistApprovalFlowEnabled(currentWorkspaceId, newVal);
@@ -301,6 +314,7 @@ export function PlanoProvider({ children }: { children: React.ReactNode }) {
     handleToggleChannel,
     workspaces,
     currentWorkspaceId,
+    setCurrentWorkspaceId,
     handleSwitchWorkspace,
     handleCreateWorkspace,
     isWorkspaceDropdownOpen,

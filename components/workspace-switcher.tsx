@@ -4,6 +4,7 @@ import React, { useEffect, useState } from "react";
 import { ChevronDown, Check, RefreshCw } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 import { useUser } from "@/lib/hooks/useUser";
+import { usePlano } from "@/lib/plano-context";
 
 interface Workspace {
   id: string;
@@ -18,9 +19,9 @@ interface WorkspaceMemberRow {
 
 export function WorkspaceSwitcher() {
   const { user } = useUser();
+  const { currentWorkspaceId, setCurrentWorkspaceId, handleSwitchWorkspace } = usePlano();
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [loading, setLoading] = useState(true);
-  const [currentWorkspaceId, setCurrentWorkspaceId] = useState<string | null>(null);
   const [isOpen, setIsOpen] = useState(false);
 
   useEffect(() => {
@@ -53,13 +54,19 @@ export function WorkspaceSwitcher() {
           .filter((ws): ws is Workspace => Boolean(ws));
 
         setWorkspaces(loaded);
-        setCurrentWorkspaceId((prev) => prev ?? loaded[0]?.id ?? null);
+        // Seed PlanoProvider's currentWorkspaceId with a default the first
+        // time this resolves — quiet (no toast), unlike explicitly picking a
+        // workspace from the dropdown below.
+        if (!currentWorkspaceId && loaded[0]) {
+          setCurrentWorkspaceId(loaded[0].id);
+        }
         setLoading(false);
       });
 
     return () => {
       cancelled = true;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user]);
 
   if (!user) return null;
@@ -105,7 +112,7 @@ export function WorkspaceSwitcher() {
                 <button
                   key={ws.id}
                   onClick={() => {
-                    setCurrentWorkspaceId(ws.id);
+                    handleSwitchWorkspace(ws.id, ws.name);
                     setIsOpen(false);
                   }}
                   className={`flex items-center justify-between w-full gap-2 px-2.5 py-2 rounded-lg text-left transition cursor-pointer ${

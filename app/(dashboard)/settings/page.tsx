@@ -12,17 +12,23 @@ export default function SettingsPage() {
     updatePostsInStorage,
     updateChannelsInStorage,
     triggerNotification,
+    currentWorkspaceId,
   } = usePlano();
 
-  const handleResetData = () => {
+  const handleResetData = async () => {
     if (
       confirm(
-        "Are you sure you want to reset all posts, connected accounts, and chat logs back to the default state?"
+        "Are you sure you want to reset all posts and chat logs back to the default state?"
       )
     ) {
       resetToDefaults();
       updatePostsInStorage(getStoredPosts());
-      updateChannelsInStorage(getStoredChannels());
+      // Channels are real Supabase rows now — resetToDefaults() only clears
+      // the (now-unused) mock localStorage bucket, so this just re-reads
+      // whatever is actually connected rather than resetting anything.
+      if (currentWorkspaceId) {
+        updateChannelsInStorage(await getStoredChannels(currentWorkspaceId));
+      }
       saveChatHistory(getDefaultChatHistory());
       triggerNotification("Application data reset successfully.", "success");
     }
