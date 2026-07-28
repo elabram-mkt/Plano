@@ -18,6 +18,8 @@ import {
   setHasUsedAi as persistHasUsedAi,
   generateId,
 } from "@/lib/store";
+import { createClient } from "@/lib/supabase/client";
+import { deletePost, updatePost } from "@/lib/db/posts";
 
 export type GhostPost = Post & { isGhost?: boolean; originalId?: string; ghostDate?: string };
 export type Toast = { id: string; text: string; type: "success" | "error" | "info" };
@@ -193,12 +195,18 @@ export function PlanoProvider({ children }: { children: React.ReactNode }) {
   );
 
   const handleDeletePost = useCallback(
-    (id: string) => {
-      const updated = posts.filter((p) => p.id !== id);
-      updatePostsInStorage(updated);
-      triggerNotification("Post deleted.", "info");
+    async (id: string) => {
+      try {
+        const supabase = createClient();
+        await deletePost(supabase, id);
+        setPosts((prev) => prev.filter((p) => p.id !== id));
+        triggerNotification("Post deleted.", "info");
+      } catch (err) {
+        console.error("Failed to delete post:", err);
+        triggerNotification("Failed to delete post.", "error");
+      }
     },
-    [posts, updatePostsInStorage, triggerNotification]
+    [triggerNotification]
   );
 
   const handleSkipOccurrence = useCallback(
@@ -219,18 +227,32 @@ export function PlanoProvider({ children }: { children: React.ReactNode }) {
   );
 
   const handleRequestChanges = useCallback(
-    (postId: string, comment: string) => {
+    async (postId: string, comment: string) => {
       if (!comment.trim()) return;
-      const updated = posts.map((p) => {
-        if (p.id === postId) {
-          return { ...p, status: "draft" as const, approvalComment: comment.trim() };
-        }
-        return p;
-      });
-      updatePostsInStorage(updated);
-      triggerNotification("Changes requested. Post returned to Drafts.", "info");
+      try {
+        const supabase = createClient();
+        const updated = await updatePost(supabase, postId, {
+          status: "draft",
+          approvalComment: comment.trim(),
+        });
+        setPosts((prev) =>
+          prev.map((p) =>
+            p.id === postId
+              ? {
+                  ...p,
+                  status: updated.status as Post["status"],
+                  approvalComment: updated.approval_comment ?? undefined,
+                }
+              : p
+          )
+        );
+        triggerNotification("Changes requested. Post returned to Drafts.", "info");
+      } catch (err) {
+        console.error("Failed to request changes:", err);
+        triggerNotification("Failed to request changes.", "error");
+      }
     },
-    [posts, updatePostsInStorage, triggerNotification]
+    [triggerNotification]
   );
 
   const handleEditPost = useCallback(
