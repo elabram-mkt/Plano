@@ -25,14 +25,98 @@ import {
   ArrowRight,
 } from "lucide-react";
 import { usePlano } from "@/lib/plano-context";
-import { PLATFORMS_CONFIG, ProductionBrief } from "@/lib/store";
+import { PLATFORMS_CONFIG, ProductionBrief, type Post } from "@/lib/store";
 import { getPlatformIcon, getPlatformBrandColor } from "@/components/platform-visuals";
 import { PlatformMockup } from "@/components/platform-mockup";
+import { createClient } from "@/lib/supabase/client";
+import { createPost, updatePost } from "@/lib/db/posts";
+import type { DbClient, Post as DbPost } from "@/lib/db/types";
+
+// datetime-local inputs are unzoned "YYYY-MM-DDTHH:MM" strings; per the ECMA-262
+// Date Time String Format, that form (no offset) parses/prints as local time,
+// which is exactly what round-trips through a UTC `timestamptz` column correctly.
+function localInputToIso(local: string): string {
+  return new Date(local).toISOString();
+}
+
+function isoToLocalInput(iso: string): string {
+  const d = new Date(iso);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+async function syncPostTargets(supabase: DbClient, postId: string, platforms: string[]) {
+  const { error: deleteError } = await supabase.from("post_targets").delete().eq("post_id", postId);
+  if (deleteError) throw deleteError;
+  if (platforms.length > 0) {
+    const { error: insertError } = await supabase
+      .from("post_targets")
+      .insert(platforms.map((platform) => ({ post_id: postId, platform })));
+    if (insertError) throw insertError;
+  }
+}
+
+// Keeps post_media at exactly one row (order_index 0) mirroring the composer's
+// single-image `media` field, or none when media is cleared.
+async function syncPostMedia(supabase: DbClient, postId: string, media: string | null) {
+  if (!media) {
+    const { error } = await supabase.from("post_media").delete().eq("post_id", postId);
+    if (error) throw error;
+    return;
+  }
+
+  const { data: existing, error: findError } = await supabase
+    .from("post_media")
+    .select("id")
+    .eq("post_id", postId)
+    .eq("order_index", 0)
+    .maybeSingle();
+  if (findError) throw findError;
+
+  if (existing) {
+    const { error } = await supabase
+      .from("post_media")
+      .update({ storage_path: media, media_type: "image" })
+      .eq("id", existing.id);
+    if (error) throw error;
+  } else {
+    const { error } = await supabase
+      .from("post_media")
+      .insert({ post_id: postId, storage_path: media, media_type: "image", order_index: 0 });
+    if (error) throw error;
+  }
+}
+
+// Maps a persisted posts row back into the app's local Post shape. platforms/
+// media/isCustomized have no DB column (post_targets/post_media are separate
+// tables, isCustomized is UI-only) so those come from the form state that was
+// just saved rather than from the row.
+function dbRowToLocalPost(
+  row: DbPost,
+  form: { platforms: string[]; media: string | null; isCustomized: boolean; skippedOccurrences?: string[] }
+): Post {
+  return {
+    id: row.id,
+    platforms: form.platforms,
+    caption: row.caption ?? "",
+    captions: form.isCustomized ? ((row.platform_captions as Record<string, string>) ?? {}) : undefined,
+    isCustomized: form.isCustomized,
+    media: form.media,
+    scheduledAt: row.scheduled_at ? isoToLocalInput(row.scheduled_at) : "",
+    status: row.status as Post["status"],
+    publishedAt: row.published_at,
+    repeat: row.repeat_interval ? (String(row.repeat_interval) as Post["repeat"]) : undefined,
+    skippedOccurrences: form.skippedOccurrences,
+    approvalComment: row.approval_comment ?? undefined,
+    productionBrief: (row.brief_json as unknown as ProductionBrief) ?? undefined,
+  };
+}
 
 export default function ComposePage() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const { posts, channels, approvalFlowEnabled, updatePostsInStorage, triggerNotification, markAiUsed } = usePlano();
+  const { posts, channels, approvalFlowEnabled, setPosts, currentWorkspaceId, triggerNotification, markAiUsed } =
+    usePlano();
 
   const [editingPostId, setEditingPostId] = useState<string | null>(null);
   const [selectedPlatforms, setSelectedPlatforms] = useState<string[]>([]);
@@ -183,7 +267,7 @@ export default function ComposePage() {
     }
   };
 
-  const handleSavePost = (overrideStatus?: "published" | "scheduled" | "draft") => {
+  const handleSavePost = async (overrideStatus?: "published" | "scheduled" | "draft") => {
     if (selectedPlatforms.length === 0) {
       triggerNotification("Please select at least one connected platform.", "error");
       return;
@@ -231,66 +315,92 @@ export default function ComposePage() {
       }
     }
 
-    const currentTimestamp = new Date().toISOString().slice(0, 16);
+    const nowIso = new Date().toISOString();
+    const resolvedScheduledAtIso = actualStatus === "published" ? nowIso : localInputToIso(scheduledAt);
+    const resolvedPublishedAtIso = actualStatus === "published" ? nowIso : null;
+    const resolvedRepeatInterval = repeat === "none" ? null : Number(repeat);
+    const resolvedBriefJson = generatedBrief ? (generatedBrief as unknown as DbPost["brief_json"]) : null;
+    const resolvedPlatformCaptions = isCustomized ? captions : {};
 
     if (editingPostId) {
-      const updated = posts.map((p) => {
-        if (p.id === editingPostId) {
-          return {
-            ...p,
-            platforms: selectedPlatforms,
-            caption: isCustomized ? "" : caption,
-            captions: isCustomized ? captions : undefined,
-            isCustomized,
-            media,
-            scheduledAt: actualStatus === "published" ? currentTimestamp : scheduledAt,
-            status: actualStatus,
-            publishedAt: actualStatus === "published" ? currentTimestamp : null,
-            repeat: repeat === "none" ? undefined : repeat,
-            productionBrief: generatedBrief || undefined,
-            approvalComment: actualStatus === "pending_review" ? undefined : p.approvalComment,
-          };
+      try {
+        const supabase = createClient();
+        const updatedRow = await updatePost(supabase, editingPostId, {
+          caption: isCustomized ? "" : caption,
+          platformCaptions: resolvedPlatformCaptions,
+          status: actualStatus,
+          scheduledAt: resolvedScheduledAtIso,
+          publishedAt: resolvedPublishedAtIso,
+          repeatInterval: resolvedRepeatInterval,
+          briefJson: resolvedBriefJson,
+          approvalComment: actualStatus === "pending_review" ? null : undefined,
+        });
+        await syncPostTargets(supabase, editingPostId, selectedPlatforms);
+        await syncPostMedia(supabase, editingPostId, media);
+
+        setPosts((prev) =>
+          prev.map((p) =>
+            p.id === editingPostId
+              ? dbRowToLocalPost(updatedRow, {
+                  platforms: selectedPlatforms,
+                  media,
+                  isCustomized,
+                  skippedOccurrences: p.skippedOccurrences,
+                })
+              : p
+          )
+        );
+
+        if (submittedForReview) {
+          triggerNotification("Post submitted to Pending Review queue for approval.", "success");
+        } else if (actualStatus === "scheduled") {
+          triggerNotification("Post scheduled successfully!", "success");
+        } else if (actualStatus === "draft") {
+          triggerNotification("Draft saved successfully!", "success");
+        } else {
+          triggerNotification(`Post successfully updated and set to ${actualStatus}!`, "success");
         }
-        return p;
-      });
-      updatePostsInStorage(updated);
-      if (submittedForReview) {
-        triggerNotification("Post submitted to Pending Review queue for approval.", "success");
-      } else if (actualStatus === "scheduled") {
-        triggerNotification("Post scheduled successfully!", "success");
-      } else if (actualStatus === "draft") {
-        triggerNotification("Draft saved successfully!", "success");
-      } else {
-        triggerNotification(`Post successfully updated and set to ${actualStatus}!`, "success");
+        resetComposerForm();
+        router.push("/queue");
+      } catch (err) {
+        console.error("Failed to save post:", err);
+        triggerNotification("Failed to save post. Please try again.", "error");
       }
-      resetComposerForm();
-      router.push("/queue");
     } else {
-      const newPost = {
-        id: String(Math.floor(Math.random() * 10000000) + Date.now()),
-        platforms: selectedPlatforms,
-        caption: isCustomized ? "" : caption,
-        captions: isCustomized ? captions : undefined,
-        isCustomized,
-        media,
-        scheduledAt: actualStatus === "published" ? currentTimestamp : scheduledAt,
-        status: actualStatus,
-        publishedAt: actualStatus === "published" ? currentTimestamp : null,
-        repeat: repeat === "none" ? undefined : repeat,
-        productionBrief: generatedBrief || undefined,
-      };
-      updatePostsInStorage([newPost, ...posts]);
-      if (submittedForReview) {
-        triggerNotification("Post submitted to Pending Review queue for approval.", "success");
-      } else if (actualStatus === "scheduled") {
-        triggerNotification("Post scheduled successfully!", "success");
-      } else if (actualStatus === "draft") {
-        triggerNotification("Draft saved successfully!", "success");
-      } else {
-        triggerNotification(`Post successfully created as ${actualStatus}!`, "success");
+      try {
+        if (!currentWorkspaceId) throw new Error("No workspace selected");
+        const supabase = createClient();
+        const newRow = await createPost(supabase, currentWorkspaceId, {
+          caption: isCustomized ? "" : caption,
+          platformCaptions: resolvedPlatformCaptions,
+          status: actualStatus,
+          scheduledAt: resolvedScheduledAtIso,
+          repeatInterval: resolvedRepeatInterval,
+          briefJson: resolvedBriefJson,
+          targets: selectedPlatforms.map((platform) => ({ platform })),
+        });
+        await syncPostMedia(supabase, newRow.id, media);
+
+        setPosts((prev) => [
+          dbRowToLocalPost(newRow, { platforms: selectedPlatforms, media, isCustomized }),
+          ...prev,
+        ]);
+
+        if (submittedForReview) {
+          triggerNotification("Post submitted to Pending Review queue for approval.", "success");
+        } else if (actualStatus === "scheduled") {
+          triggerNotification("Post scheduled successfully!", "success");
+        } else if (actualStatus === "draft") {
+          triggerNotification("Draft saved successfully!", "success");
+        } else {
+          triggerNotification(`Post successfully created as ${actualStatus}!`, "success");
+        }
+        resetComposerForm();
+        router.push("/queue");
+      } catch (err) {
+        console.error("Failed to create post:", err);
+        triggerNotification("Failed to create post. Please try again.", "error");
       }
-      resetComposerForm();
-      router.push("/queue");
     }
   };
 

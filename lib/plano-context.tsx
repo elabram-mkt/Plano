@@ -29,6 +29,10 @@ interface PlanoContextValue {
 
   posts: Post[];
   expandedPosts: GhostPost[];
+  // Raw state setter for callers writing directly to a real backend (e.g.
+  // Supabase-backed compose/queue flows) that must bypass the localStorage
+  // persistence updatePostsInStorage performs.
+  setPosts: React.Dispatch<React.SetStateAction<Post[]>>;
   updatePostsInStorage: (updated: Post[]) => void;
   handleDeletePost: (id: string) => void;
   handleSkipOccurrence: (originalId: string, dateStr: string) => void;
@@ -325,6 +329,7 @@ export function PlanoProvider({ children }: { children: React.ReactNode }) {
     mounted,
     posts,
     expandedPosts,
+    setPosts,
     updatePostsInStorage,
     handleDeletePost,
     handleSkipOccurrence,
