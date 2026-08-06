@@ -6,9 +6,9 @@ import {
   Post,
   Channel,
   Workspace,
+  ProductionBrief,
   getStoredChannels,
   saveStoredChannels,
-  getStoredPosts,
   saveStoredPosts,
   getStoredWorkspaces,
   saveStoredWorkspaces,
@@ -19,7 +19,39 @@ import {
   generateId,
 } from "@/lib/store";
 import { createClient } from "@/lib/supabase/client";
-import { deletePost, updatePost } from "@/lib/db/posts";
+import { deletePost, updatePost, getPosts } from "@/lib/db/posts";
+import type { PostWithRelations } from "@/lib/db/types";
+
+// datetime-local inputs are unzoned "YYYY-MM-DDTHH:MM" strings; per the
+// ECMA-262 Date Time String Format, that form (no offset) parses/prints as
+// local time, matching what a real UTC `timestamptz` column round-trips to.
+function isoToLocalInput(iso: string): string {
+  const d = new Date(iso);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+// Maps a posts row + relations into the app's local Post shape. skippedOccurrences
+// has no DB column (client-side-only feature, unmigrated) so it defaults to [].
+function dbPostToLocalPost(row: PostWithRelations): Post {
+  const platformCaptions = (row.platform_captions as Record<string, string> | null) ?? {};
+  const isCustomized = Object.keys(platformCaptions).length > 1;
+  return {
+    id: row.id,
+    platforms: row.post_targets.map((t) => t.platform),
+    caption: row.caption ?? "",
+    captions: isCustomized ? platformCaptions : undefined,
+    isCustomized,
+    media: row.post_media[0]?.storage_path ?? null,
+    scheduledAt: row.scheduled_at ? isoToLocalInput(row.scheduled_at) : "",
+    status: row.status as Post["status"],
+    publishedAt: row.published_at,
+    repeat: row.repeat_interval ? (String(row.repeat_interval) as Post["repeat"]) : undefined,
+    skippedOccurrences: [],
+    approvalComment: row.approval_comment ?? undefined,
+    productionBrief: (row.brief_json as unknown as ProductionBrief) ?? undefined,
+  };
+}
 
 export type GhostPost = Post & { isGhost?: boolean; originalId?: string; ghostDate?: string };
 export type Toast = { id: string; text: string; type: "success" | "error" | "info" };
@@ -278,7 +310,11 @@ export function PlanoProvider({ children }: { children: React.ReactNode }) {
   const setCurrentWorkspaceId = useCallback((workspaceId: string) => {
     setCurrentWorkspaceIdState(workspaceId);
     setApprovalFlowEnabledState(getApprovalFlowEnabled(workspaceId));
-    setPosts(getStoredPosts(workspaceId));
+    // TEMP DEBUG — commented out to isolate a login hang
+    // const supabase = createClient();
+    // getPosts(supabase, workspaceId)
+    //   .then((rows) => setPosts(rows.map(dbPostToLocalPost)))
+    //   .catch((err) => console.error("Failed to load posts:", err));
     getStoredChannels(workspaceId)
       .then(setChannels)
       .catch((err) => console.error("Failed to load channels:", err));

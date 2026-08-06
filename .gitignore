@@ -8,3 +8,4 @@ coverage/
 *.tsbuildinfo
 diff*.txt
 *-review.txt
+.tmp.driveupload/
