@@ -1,11 +1,25 @@
+// Single data-access module for browser-persisted app state. Every read/write
+// to localStorage goes through here — components never call localStorage
+// directly. Internals can be swapped for a real backend later without
+// touching callers.
+//
+// Channels are the first piece migrated off localStorage: getStoredChannels/
+// saveStoredChannels below now read/write real public.social_accounts rows
+// via lib/db/channels.ts instead of a mock localStorage array. Posts are
+// still mock/localStorage — that migration hasn't happened yet.
+
+import { createClient } from "@/lib/supabase/client";
+import { getChannels, connectChannel, disconnectChannel } from "@/lib/db/channels";
+import type { SocialAccountPublic } from "@/lib/db/types";
+
 export interface ProductionBrief {
   contentTitle: string;
   objective: string;
   keyMessage: string;
   briefs: {
     role: "Video Talent" | "Graphic Designer" | "Video Editor";
-    sections: { 
-      heading: string; 
+    sections: {
+      heading: string;
       items?: string[];
       table?: {
         columns: string[];
@@ -136,7 +150,7 @@ export function getStoredWorkspaces(): Workspace[] {
   }
   try {
     return JSON.parse(stored);
-  } catch (e) {
+  } catch {
     return INITIAL_WORKSPACES;
   }
 }
@@ -156,32 +170,52 @@ export function getCurrentWorkspaceId(): string {
   return stored;
 }
 
-export function saveCurrentWorkspaceId(id: string) {
-  if (typeof window === "undefined") return;
-  localStorage.setItem("plano_current_workspace_id", id);
+// Merges real social_accounts rows onto the 6 known platforms' static
+// display metadata (name/icon/color/handle/limit) from INITIAL_CHANNELS —
+// `connected` is true only when an active row exists for that platform.
+function mapRealChannelsToDisplay(real: SocialAccountPublic[]): Channel[] {
+  return INITIAL_CHANNELS.map((mock) => ({
+    ...mock,
+    connected: real.some((r) => r.platform === mock.id && r.status === "active"),
+  }));
 }
 
-export function getStoredChannels(workspaceId?: string): Channel[] {
+export async function getStoredChannels(workspaceId: string): Promise<Channel[]> {
   if (typeof window === "undefined") return INITIAL_CHANNELS;
-  const wId = workspaceId || getCurrentWorkspaceId();
-  const key = wId === "elabram" ? "plano_channels" : `plano_channels_${wId}`;
-  const stored = localStorage.getItem(key);
-  if (!stored) {
-    localStorage.setItem(key, JSON.stringify(INITIAL_CHANNELS));
-    return INITIAL_CHANNELS;
-  }
-  try {
-    return JSON.parse(stored);
-  } catch (e) {
-    return INITIAL_CHANNELS;
-  }
+  const supabase = createClient();
+  const real = await getChannels(supabase, workspaceId);
+  return mapRealChannelsToDisplay(real);
 }
 
-export function saveStoredChannels(channels: Channel[], workspaceId?: string) {
+// Diffs the incoming target state against what's actually connected in
+// social_accounts and issues one connectChannel/disconnectChannel call per
+// platform that changed. No real OAuth yet — connecting inserts a row with
+// an empty accessTokenEnc as a placeholder; wire up a real provider flow and
+// TOKEN_ENCRYPTION_KEY-encrypted tokens before this goes further than a toggle.
+export async function saveStoredChannels(channels: Channel[], workspaceId: string): Promise<void> {
   if (typeof window === "undefined") return;
-  const wId = workspaceId || getCurrentWorkspaceId();
-  const key = wId === "elabram" ? "plano_channels" : `plano_channels_${wId}`;
-  localStorage.setItem(key, JSON.stringify(channels));
+  const supabase = createClient();
+
+  const real = await getChannels(supabase, workspaceId);
+
+  for (const target of channels) {
+    const existing = real.find((r) => r.platform === target.id && r.status === "active");
+
+    if (target.connected && !existing) {
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      if (!user) continue;
+      await connectChannel(supabase, {
+        workspaceId,
+        platform: target.id,
+        connectedBy: user.id,
+        accessTokenEnc: "",
+      });
+    } else if (!target.connected && existing) {
+      await disconnectChannel(supabase, existing.id);
+    }
+  }
 }
 
 export function getStoredPosts(workspaceId?: string): Post[] {
@@ -195,7 +229,7 @@ export function getStoredPosts(workspaceId?: string): Post[] {
   }
   try {
     return JSON.parse(stored);
-  } catch (e) {
+  } catch {
     return INITIAL_POSTS;
   }
 }
@@ -217,3 +251,59 @@ export function resetToDefaults() {
   localStorage.removeItem("plano_chat_history");
 }
 
+// ---- Onboarding "has used AI" flag ----
+
+export function getHasUsedAi(): boolean {
+  if (typeof window === "undefined") return false;
+  return localStorage.getItem("plano_has_used_ai") === "true";
+}
+
+export function setHasUsedAi() {
+  if (typeof window === "undefined") return;
+  localStorage.setItem("plano_has_used_ai", "true");
+}
+
+// ---- AI Assistant chat history ----
+
+export type ChatMessage = { role: "user" | "assistant"; content: string };
+
+export function getChatHistory(): ChatMessage[] | null {
+  if (typeof window === "undefined") return null;
+  const stored = localStorage.getItem("plano_chat_history");
+  if (!stored) return null;
+  try {
+    return JSON.parse(stored);
+  } catch {
+    return null;
+  }
+}
+
+export function saveChatHistory(messages: ChatMessage[]) {
+  if (typeof window === "undefined") return;
+  localStorage.setItem("plano_chat_history", JSON.stringify(messages));
+}
+
+export function getDefaultChatHistory(): ChatMessage[] {
+  return [
+    {
+      role: "assistant",
+      content: `Hi! I'm Plano AI, your social media assistant. 🚀\n\nI can help you:\n• Generate high-engagement captions with specific tones\n• Brainstorm hashtag combinations for your niche\n• Advise on post timing and optimal character structures\n\nTry one of the quick suggestions below or write your own question!`,
+    },
+  ];
+}
+
+// ---- Per-workspace approval flow toggle ----
+
+export function getApprovalFlowEnabled(workspaceId: string): boolean {
+  if (typeof window === "undefined") return false;
+  return localStorage.getItem(`plano_approval_flow_enabled_${workspaceId}`) === "true";
+}
+
+export function setApprovalFlowEnabled(workspaceId: string, enabled: boolean) {
+  if (typeof window === "undefined") return;
+  localStorage.setItem(`plano_approval_flow_enabled_${workspaceId}`, String(enabled));
+}
+
+export function generateId(): string {
+  return String(Math.floor(Math.random() * 10000000) + Date.now());
+}
