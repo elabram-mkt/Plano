@@ -2,7 +2,9 @@ import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getPost } from "@/lib/db/posts";
-import { publishToFacebook } from "@/lib/publishing/meta";
+import { publishToFacebook, type PublishResult } from "@/lib/publishing/meta";
+import { publishToInstagram } from "@/lib/publishing/instagram";
+import type { DbClient } from "@/lib/db/types";
 
 interface TargetResult {
   postTargetId: string;
@@ -11,6 +13,15 @@ interface TargetResult {
   externalPostId?: string;
   error?: string;
 }
+
+type PublishFn = (supabase: DbClient, postId: string, workspaceId: string) => Promise<PublishResult>;
+
+// Add a new platform by adding one entry here — the loop below looks up the
+// right publish function per target instead of branching on platform.
+const PUBLISHERS: Record<string, PublishFn> = {
+  facebook: publishToFacebook,
+  instagram: publishToInstagram,
+};
 
 export async function POST(
   request: NextRequest,
@@ -50,10 +61,10 @@ export async function POST(
       return NextResponse.json({ error: "Not a member of this workspace." }, { status: 403 });
     }
 
-    const facebookTargets = post.post_targets.filter((t) => t.platform === "facebook");
+    const publishableTargets = post.post_targets.filter((t) => t.platform in PUBLISHERS);
     const results: TargetResult[] = [];
 
-    for (const target of facebookTargets) {
+    for (const target of publishableTargets) {
       if (target.publish_status === "published") {
         results.push({
           postTargetId: target.id,
@@ -64,7 +75,8 @@ export async function POST(
         continue;
       }
 
-      const result = await publishToFacebook(admin, postId, post.workspace_id);
+      const publish = PUBLISHERS[target.platform];
+      const result = await publish(admin, postId, post.workspace_id);
 
       if (result.success) {
         const { error: updateError } = await admin
@@ -108,7 +120,7 @@ export async function POST(
       }
     }
 
-    const allSucceeded = facebookTargets.length > 0 && results.every((r) => r.status === "published");
+    const allSucceeded = publishableTargets.length > 0 && results.every((r) => r.status === "published");
 
     if (allSucceeded) {
       const { error: postUpdateError } = await admin
