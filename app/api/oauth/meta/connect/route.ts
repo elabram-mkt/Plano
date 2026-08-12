@@ -3,8 +3,8 @@ import { createClient } from "@/lib/supabase/server";
 
 const META_OAUTH_URL = "https://www.facebook.com/v21.0/dialog/oauth";
 const META_SCOPES = [
-  "instagram_business_basic",
-  "instagram_business_content_publish",
+  "instagram_basic",
+  "instagram_content_publish",
   "pages_show_list",
   "pages_read_engagement",
 ].join(",");
