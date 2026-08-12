@@ -46,8 +46,9 @@ export async function GET(request: NextRequest) {
 
   const redirectUri = new URL("/api/oauth/meta/callback", request.nextUrl.origin).toString();
 
+  const nonce = crypto.randomUUID();
   const state = Buffer.from(
-    JSON.stringify({ workspaceId, nonce: crypto.randomUUID() })
+    JSON.stringify({ workspaceId, nonce })
   ).toString("base64url");
 
   const authorizeUrl = new URL(META_OAUTH_URL);
@@ -56,5 +57,14 @@ export async function GET(request: NextRequest) {
   authorizeUrl.searchParams.set("scope", META_SCOPES);
   authorizeUrl.searchParams.set("state", state);
 
-  return NextResponse.redirect(authorizeUrl);
+  const response = NextResponse.redirect(authorizeUrl);
+  response.cookies.set("meta_oauth_nonce", nonce, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "lax",
+    maxAge: 60 * 5,
+    path: "/",
+  });
+
+  return response;
 }
