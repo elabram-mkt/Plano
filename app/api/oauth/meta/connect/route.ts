@@ -7,6 +7,7 @@ const META_SCOPES = [
   "instagram_content_publish",
   "pages_show_list",
   "pages_read_engagement",
+  "pages_manage_posts",
 ].join(",");
 
 export async function GET(request: NextRequest) {
