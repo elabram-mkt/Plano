@@ -50,12 +50,22 @@ export async function publishToFacebook(
 
     const platformCaptions = (post.platform_captions as Record<string, string> | null) ?? {};
     const message = platformCaptions.facebook || post.caption || "";
+    const mediaUrl = post.post_media[0]?.storage_path;
 
     const body = new URLSearchParams();
-    body.set("message", message);
     body.set("access_token", accessToken);
 
-    const response = await fetch(`${GRAPH_API_URL}/${channelWithTokens.external_id}/feed`, {
+    let endpoint: string;
+    if (mediaUrl) {
+      endpoint = `${GRAPH_API_URL}/${channelWithTokens.external_id}/photos`;
+      body.set("url", mediaUrl);
+      body.set("caption", message);
+    } else {
+      endpoint = `${GRAPH_API_URL}/${channelWithTokens.external_id}/feed`;
+      body.set("message", message);
+    }
+
+    const response = await fetch(endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body,
