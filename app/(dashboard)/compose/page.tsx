@@ -87,6 +87,43 @@ async function syncPostMedia(supabase: DbClient, postId: string, media: string |
   }
 }
 
+interface PublishTargetResult {
+  postTargetId: string;
+  platform: string;
+  status: "published" | "failed";
+  externalPostId?: string;
+  error?: string;
+}
+
+function formatPublishFailureMessage(results: PublishTargetResult[]): string {
+  const succeededNames = results
+    .filter((r) => r.status === "published")
+    .map((r) => PLATFORMS_CONFIG[r.platform]?.name || r.platform);
+  const failedText = results
+    .filter((r) => r.status === "failed")
+    .map((r) => `${PLATFORMS_CONFIG[r.platform]?.name || r.platform} failed: ${r.error || "Unknown error"}`)
+    .join("; ");
+  return succeededNames.length > 0 ? `Published to ${succeededNames.join(", ")}, but ${failedText}` : failedText;
+}
+
+// Calls the publish route for a just-saved post. Returns null when every
+// target published successfully (caller shows its normal success message),
+// or an error message to show instead when the request/publish failed.
+async function publishPostNow(postId: string): Promise<string | null> {
+  try {
+    const response = await fetch(`/api/posts/${postId}/publish`, { method: "POST" });
+    if (!response.ok) {
+      return "Post saved but publishing failed. Check the Queue for status.";
+    }
+    const data = await response.json();
+    const results = (data.results ?? []) as PublishTargetResult[];
+    return results.some((r) => r.status === "failed") ? formatPublishFailureMessage(results) : null;
+  } catch (err) {
+    console.error("Failed to call publish route:", err);
+    return "Post saved but publishing failed. Check the Queue for status.";
+  }
+}
+
 // Maps a persisted posts row back into the app's local Post shape. platforms/
 // media/isCustomized have no DB column (post_targets/post_media are separate
 // tables, isCustomized is UI-only) so those come from the form state that was
@@ -129,6 +166,8 @@ export default function ComposePage() {
   const [composerStatus, setComposerStatus] = useState<"scheduled" | "draft">("scheduled");
   const [repeat, setRepeat] = useState<"none" | "7" | "14" | "30">("none");
   const [mediaDragging, setMediaDragging] = useState(false);
+  const [isUploadingMedia, setIsUploadingMedia] = useState(false);
+  const [mediaUploadPreviewUrl, setMediaUploadPreviewUrl] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [activePreviewTab, setActivePreviewTab] = useState<string | null>(null);
 
@@ -235,19 +274,39 @@ export default function ComposePage() {
   const strictestLimit = getStrictestLimit();
   const isOverLimit = caption.length > strictestLimit;
 
-  const handleImageFile = (file: File) => {
+  const handleImageFile = async (file: File) => {
     if (!file.type.startsWith("image/")) {
       triggerNotification("Only image files are supported.", "error");
       return;
     }
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      if (e.target?.result) {
-        setMedia(e.target.result as string);
-        triggerNotification("Image attached successfully!", "success");
-      }
-    };
-    reader.readAsDataURL(file);
+    if (!currentWorkspaceId) {
+      triggerNotification("No workspace selected.", "error");
+      return;
+    }
+
+    const objectUrl = URL.createObjectURL(file);
+    setMediaUploadPreviewUrl(objectUrl);
+    setIsUploadingMedia(true);
+
+    try {
+      const supabase = createClient();
+      const path = `${currentWorkspaceId}/${crypto.randomUUID()}-${file.name}`;
+      const { error: uploadError } = await supabase.storage.from("post-media").upload(path, file);
+      if (uploadError) throw uploadError;
+
+      const {
+        data: { publicUrl },
+      } = supabase.storage.from("post-media").getPublicUrl(path);
+      setMedia(publicUrl);
+      triggerNotification("Image attached successfully!", "success");
+    } catch (err) {
+      console.error("Failed to upload image:", err);
+      triggerNotification("Failed to upload image. Please try again.", "error");
+    } finally {
+      setIsUploadingMedia(false);
+      setMediaUploadPreviewUrl(null);
+      URL.revokeObjectURL(objectUrl);
+    }
   };
 
   const onDragOver = (e: React.DragEvent) => {
@@ -351,7 +410,12 @@ export default function ComposePage() {
           )
         );
 
-        if (submittedForReview) {
+        const publishFailureMessage =
+          overrideStatus === "published" ? await publishPostNow(editingPostId) : null;
+
+        if (publishFailureMessage) {
+          triggerNotification(publishFailureMessage, "error");
+        } else if (submittedForReview) {
           triggerNotification("Post submitted to Pending Review queue for approval.", "success");
         } else if (actualStatus === "scheduled") {
           triggerNotification("Post scheduled successfully!", "success");
@@ -386,7 +450,11 @@ export default function ComposePage() {
           ...prev,
         ]);
 
-        if (submittedForReview) {
+        const publishFailureMessage = overrideStatus === "published" ? await publishPostNow(newRow.id) : null;
+
+        if (publishFailureMessage) {
+          triggerNotification(publishFailureMessage, "error");
+        } else if (submittedForReview) {
           triggerNotification("Post submitted to Pending Review queue for approval.", "success");
         } else if (actualStatus === "scheduled") {
           triggerNotification("Post scheduled successfully!", "success");
@@ -1242,27 +1310,38 @@ ${retry ? "IMPORTANT: Return ONLY valid JSON. No markdown code blocks." : ""}`;
           {/* Image / Media Upload Box */}
           <div className="flex flex-col gap-2">
             <span className="text-xs font-semibold text-slate-400">Attached Media</span>
-            {media ? (
+            {media || mediaUploadPreviewUrl ? (
               <div className="relative group rounded-lg overflow-hidden border border-slate-800 bg-slate-950">
                 {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img src={media} alt="Uploaded attachment" className="w-full max-h-[180px] object-cover" />
-                <div className="absolute inset-0 bg-slate-950/60 opacity-0 group-hover:opacity-100 flex items-center justify-center transition gap-2">
-                  <button
-                    onClick={() => fileInputRef.current?.click()}
-                    className="px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-white rounded-lg text-xs font-medium transition"
-                  >
-                    Replace
-                  </button>
-                  <button
-                    onClick={() => {
-                      setMedia(null);
-                      triggerNotification("Image removed.", "info");
-                    }}
-                    className="px-3 py-1.5 bg-rose-600 hover:bg-rose-500 text-white rounded-lg text-xs font-medium transition flex items-center gap-1"
-                  >
-                    <Trash2 className="w-3 h-3" /> Remove
-                  </button>
-                </div>
+                <img
+                  src={media || mediaUploadPreviewUrl || ""}
+                  alt="Uploaded attachment"
+                  className="w-full max-h-[180px] object-cover"
+                />
+                {isUploadingMedia ? (
+                  <div className="absolute inset-0 bg-slate-950/70 flex flex-col items-center justify-center gap-2">
+                    <RefreshCw className="w-5 h-5 text-white animate-spin" />
+                    <span className="text-xs font-medium text-white">Uploading...</span>
+                  </div>
+                ) : (
+                  <div className="absolute inset-0 bg-slate-950/60 opacity-0 group-hover:opacity-100 flex items-center justify-center transition gap-2">
+                    <button
+                      onClick={() => fileInputRef.current?.click()}
+                      className="px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-white rounded-lg text-xs font-medium transition"
+                    >
+                      Replace
+                    </button>
+                    <button
+                      onClick={() => {
+                        setMedia(null);
+                        triggerNotification("Image removed.", "info");
+                      }}
+                      className="px-3 py-1.5 bg-rose-600 hover:bg-rose-500 text-white rounded-lg text-xs font-medium transition flex items-center gap-1"
+                    >
+                      <Trash2 className="w-3 h-3" /> Remove
+                    </button>
+                  </div>
+                )}
               </div>
             ) : (
               <div
@@ -1278,7 +1357,7 @@ ${retry ? "IMPORTANT: Return ONLY valid JSON. No markdown code blocks." : ""}`;
                 <p className="text-xs font-medium text-slate-400">
                   Drag & Drop image here, or <span className="text-indigo-400 hover:underline">browse files</span>
                 </p>
-                <p className="text-[10px] text-slate-500">Supports PNG, JPG, WEBP (stored locally)</p>
+                <p className="text-[10px] text-slate-500">Supports PNG, JPG, WEBP</p>
               </div>
             )}
             <input

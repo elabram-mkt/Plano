@@ -52,7 +52,8 @@ export type PostStatus =
   | "scheduled"
   | "pending_review"
   | "approved"
-  | "published";
+  | "published"
+  | "processing";
 
 export interface PostFilters {
   status?: PostStatus | PostStatus[];

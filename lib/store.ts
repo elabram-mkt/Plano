@@ -171,13 +171,19 @@ export function getCurrentWorkspaceId(): string {
 }
 
 // Merges real social_accounts rows onto the 6 known platforms' static
-// display metadata (name/icon/color/handle/limit) from INITIAL_CHANNELS —
-// `connected` is true only when an active row exists for that platform.
+// display metadata (name/icon/color/limit) from INITIAL_CHANNELS —
+// `connected` is true and `handle` reflects the real account_name only
+// when an active row exists for that platform; otherwise both fall back
+// to the mock values.
 function mapRealChannelsToDisplay(real: SocialAccountPublic[]): Channel[] {
-  return INITIAL_CHANNELS.map((mock) => ({
-    ...mock,
-    connected: real.some((r) => r.platform === mock.id && r.status === "active"),
-  }));
+  return INITIAL_CHANNELS.map((mock) => {
+    const connectedRow = real.find((r) => r.platform === mock.id && r.status === "active");
+    return {
+      ...mock,
+      connected: !!connectedRow,
+      handle: connectedRow?.account_name || mock.handle,
+    };
+  });
 }
 
 export async function getStoredChannels(workspaceId: string): Promise<Channel[]> {

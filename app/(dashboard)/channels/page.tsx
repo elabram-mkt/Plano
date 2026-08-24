@@ -1,13 +1,43 @@
 "use client";
 
-import React from "react";
+import React, { useEffect } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { Layers } from "lucide-react";
 import { usePlano } from "@/lib/plano-context";
 import { PLATFORMS_CONFIG } from "@/lib/store";
 import { getPlatformIcon, getPlatformBrandColor } from "@/components/platform-visuals";
 
+// Platforms that go through the real Meta OAuth flow (app/api/oauth/meta/*)
+// rather than the mock connect/disconnect toggle.
+const META_OAUTH_PLATFORMS = new Set(["facebook", "instagram"]);
+
+const OAUTH_ERROR_MESSAGES: Record<string, string> = {
+  meta_denied: "Meta connection was cancelled.",
+  invalid_state: "Connection request expired or was invalid. Please try again.",
+  unauthorized: "You don't have permission to connect channels for this workspace.",
+  connection_failed: "Couldn't complete the connection. Please try again.",
+};
+
 export default function ChannelsPage() {
-  const { channels, handleToggleChannel } = usePlano();
+  const { channels, handleToggleChannel, currentWorkspaceId, triggerNotification } = usePlano();
+  const router = useRouter();
+  const searchParams = useSearchParams();
+
+  useEffect(() => {
+    const connected = searchParams.get("connected");
+    const error = searchParams.get("error");
+
+    if (connected) {
+      triggerNotification(`Connected: ${connected.split(",").join(", ")}`, "success");
+    } else if (error) {
+      triggerNotification(OAUTH_ERROR_MESSAGES[error] ?? "Something went wrong connecting that channel.", "error");
+    }
+
+    if (connected || error) {
+      router.replace("/channels");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
 
   return (
     <div className="flex-1 flex flex-col gap-6 max-w-4xl mx-auto w-full">
@@ -69,7 +99,17 @@ export default function ChannelsPage() {
 
               <div className="pt-2">
                 <button
-                  onClick={() => handleToggleChannel(chan.id)}
+                  onClick={() => {
+                    if (!chan.connected && META_OAUTH_PLATFORMS.has(chan.id)) {
+                      if (!currentWorkspaceId) {
+                        triggerNotification("Select a workspace before connecting a channel.", "error");
+                        return;
+                      }
+                      window.location.href = `/api/oauth/meta/connect?workspaceId=${currentWorkspaceId}`;
+                      return;
+                    }
+                    handleToggleChannel(chan.id);
+                  }}
                   className={`w-full py-1.5 rounded-lg text-xs font-semibold border transition ${
                     chan.connected
                       ? "bg-slate-950 text-slate-300 border-slate-800 hover:border-slate-700 hover:bg-slate-900"
