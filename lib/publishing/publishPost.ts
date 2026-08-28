@@ -1,6 +1,7 @@
 import { getPost } from "@/lib/db/posts";
 import { publishToFacebook, type PublishResult } from "@/lib/publishing/meta";
 import { publishToInstagram } from "@/lib/publishing/instagram";
+import { publishToThreads } from "@/lib/publishing/threads";
 import type { DbClient } from "@/lib/db/types";
 
 export interface TargetResult {
@@ -18,6 +19,7 @@ type PublishFn = (supabase: DbClient, postId: string, workspaceId: string) => Pr
 const PUBLISHERS: Record<string, PublishFn> = {
   facebook: publishToFacebook,
   instagram: publishToInstagram,
+  threads: publishToThreads,
 };
 
 export async function publishPost(
